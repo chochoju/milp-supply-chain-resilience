@@ -78,7 +78,7 @@ flowchart TD
 ### Sets, Indices & Decision Variables
 
 - $i$ denotes a component, $l \in \mathcal{L}_i$ a supplier and freight lane for that component, and $t$ an order week.
-- $N_{l,t} \in \mathbb{Z}_{\ge 0}$ is the number of whole lots ordered, and $Y_{l,t} \in \{0,1\}$ indicates whether the lane is used.
+- $`N_{l,t} \in \mathbb{Z}_{\ge 0}`$ is the number of whole lots ordered on lane $`l`$ in week $`t`$. The binary variable $`Y_{l,t} \in \{0,1\}`$ equals 1 if the lane is used that week and 0 otherwise.
 - $I_{i,t}, B_{i,t} \ge 0$ are ending on-hand inventory and outstanding backlog, in component units.
 
 ### Objective Function & Operational Constraints
