@@ -15,7 +15,7 @@ This repository accompanies the white paper *Procurement and Inventory Planning 
 The benchmark follows a U.S. battery energy storage system (BESS) assembly plant over **26 weeks**. It covers six components for a 100 kWh enclosure, four suppliers across three regions, and 68 component-specific supply lanes. In the base case, an unannounced port disruption reduces offshore ordering capacity to 15% of normal in weeks 11–14. Forecast assembly demand rises in weeks 14–19 and peaks at 64 systems per week, compared with the usual 45.
 
 - **95.26% on-time component fill** for the rolling-horizon MILP in the base case and **94.38% on average** across 132 matched scenarios.
-- **77.63% lower modeled total cost** than the static ocean policy in the base case, including backlog penalties. Cost before penalties was **$18.95M** for the rolling MILP and **$13.03M** for static ocean.
+- **77.63% lower modeled total cost** than the static ocean policy in the base case, including backlog penalties. Cost before penalties was **USD 18.95M** for the rolling MILP and **USD 13.03M** for static ocean.
 - **27.05% lower modeled total cost** when the backlog penalty is reduced to one-tenth of its base value and the rolling policy is reoptimized.
 
 ## Repository Structure
@@ -77,34 +77,31 @@ flowchart TD
 
 ### Sets, Indices & Decision Variables
 
-- $i$ denotes a component, $l in mathcal{L}_i$ a supplier and freight lane for that component, and $t$ an order week.
-- $N_{l,t} in mathbb{Z}_{ge 0}$ is the number of whole lots ordered, and $Y_{l,t} in {0,1}$ indicates whether the lane is used.
-- $I_{i,t}, B_{i,t} ge 0$ are ending on-hand inventory and outstanding backlog, in component units.
+- $i$ denotes a component, $l \in \mathcal{L}_i$ a supplier and freight lane for that component, and $t$ an order week.
+- $N_{l,t} \in \mathbb{Z}_{\ge 0}$ is the number of whole lots ordered, and $Y_{l,t} \in \{0,1\}$ indicates whether the lane is used.
+- $I_{i,t}, B_{i,t} \ge 0$ are ending on-hand inventory and outstanding backlog, in component units.
 
 ### Objective Function & Operational Constraints
 
 Minimize purchase, modeled duties and discounts, freight, fixed order fees, inventory holding, and weekly backlog penalties. Here $c_l$ is net variable cost per unit, $K_l$ is the fixed order fee, $h_i$ is the holding rate, and $p_i$ is the backlog penalty rate.
 
-$$
-min sum_t left[
-sum_l left(c_l q_l N_{l,t} + K_l Y_{l,t}
-ight)
-+ sum_i left(h_i I_{i,t} + p_i B_{i,t}
-ight)
-
-ight]
-$$
+```math
+\min \sum_t \left[
+  \sum_l \left(c_l q_l N_{l,t} + K_l Y_{l,t}\right)
+  + \sum_i \left(h_i I_{i,t} + p_i B_{i,t}\right)
+\right]
+```
 
 Lot size $q_l$ is the smallest of the usable-volume limit, gross-payload limit, and commercial lot cap. The model applies minimum and maximum lot bounds, supplier capacity limits, and a **480 m³** cap on projected end-of-week inventory. Standard freight is capped at standard capacity. Where air is available, combined standard and air order quantity is subject to a shared supplier quantity limit of 1.5 times that capacity.
 
-Inventory balance includes pre-horizon receipts $ar{Q}_{i,t}$ and orders placed $L_l$ weeks earlier. A one-week lead means an order placed at the end of week $t$ arrives in week $t+1$.
+Inventory balance includes pre-horizon receipts $\bar{Q}_{i,t}$ and orders placed $L_l$ weeks earlier. A one-week lead means an order placed at the end of week $t$ arrives in week $t+1$.
 
-$$
+```math
 I_{i,t} - B_{i,t} =
-I_{i,t-1} - B_{i,t-1} + ar{Q}_{i,t}
-+ sum_{l in mathcal{L}_i:,t-L_lgeq 1} q_l N_{l,t-L_l}
-- D_{i,t}
-$$
+  I_{i,t-1} - B_{i,t-1} + \bar{Q}_{i,t}
+  + \sum_{l \in \mathcal{L}_i:\, t-L_l \ge 1} q_l N_{l,t-L_l}
+  - D_{i,t}
+```
 
 The simulation excludes orders arriving after week 26 and scores ending inventory and backlog without a terminal safety-stock target. On-time component fill uses FIFO fulfillment. New unmet demand equals the smaller of ending backlog and current-period demand.
 
@@ -112,13 +109,13 @@ The simulation excludes orders arriving after week 26 and scores ending inventor
 
 ### Deterministic 26-Week Five-Policy Benchmark
 
-| Policy | Cost before backlog penalty | Backlog penalty | Modeled total cost | On-time component fill | Peak warehouse use |
+| Policy | Cost before backlog penalty (USD) | Backlog penalty (USD) | Modeled total cost (USD) | On-time component fill | Peak warehouse use |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| A · Static ocean | $13.03M | $87.32M | $100.35M | 31.10% | 35.04% |
-| B1 · Reactive air | $21.58M | $31.67M | $53.25M | 56.91% | 52.36% |
-| B2 · Three-region heuristic | $15.44M | $57.22M | $72.67M | 69.36% | 95.31% |
-| **C · Rolling MILP** | **$18.95M** | **$3.49M** | **$22.45M** | **95.26%** | **51.53%** |
-| D · Perfect-foresight reference | $18.89M | $3.54M | $22.43M | 95.10% | 57.70% |
+| A · Static ocean | 13.03M | 87.32M | 100.35M | 31.10% | 35.04% |
+| B1 · Reactive air | 21.58M | 31.67M | 53.25M | 56.91% | 52.36% |
+| B2 · Three-region heuristic | 15.44M | 57.22M | 72.67M | 69.36% | 95.31% |
+| **C · Rolling MILP** | **18.95M** | **3.49M** | **22.45M** | **95.26%** | **51.53%** |
+| D · Perfect-foresight reference | 18.89M | 3.54M | 22.43M | 95.10% | 57.70% |
 
 Source [`results/benchmark_comparison.csv`](results/benchmark_comparison.csv). Peak warehouse use measures realized end-of-week inventory volume. The C–B2 difference reflects the ordering method, lane access, and planning constraints together.
 
@@ -176,7 +173,7 @@ The benchmark combines selected public reference values with synthetic costs, le
 
 - **Drayage payloads.** OCEMA recommends cargo limits of 17,780 kg for the modeled 20-ft slider, 19,960 kg for the tri-axle, and 19,820 kg for the 40-ft high-cube configuration. The model adds 7% to net unit weight as a synthetic packaging allowance. [OCEMA and Maersk guidance](https://www.maersk.com/local-information/north-america/united-states-of-america)
 - **Battery system cost context.** NREL reports delivered cabinet and system-level power cost parameters for utility-scale storage. The component purchase prices in this benchmark are synthetic. [NREL 2025 cost update](https://doi.org/10.2172/2583471)
-- **Tariff and credit assumptions.** Offshore lanes use synthetic tariff proxies of 25% or 50%. The modeled Mexican lanes use a zero-duty assumption. The U.S. module receives a hypothetical $250 supplier discount, equivalent to full pass-through of $10/kWh for an eligible 25 kWh cell-based module. The modeled PCS discount is $0. [USTR Section 301 notice](https://www.govinfo.gov/app/details/FR-2024-09-18/2024-21217) · [CBP USMCA guidance](https://trade.cbp.gov/USMCA/s/faqs) · [26 U.S.C. § 45X](https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title26-section45X)
+- **Tariff and credit assumptions.** Offshore lanes use synthetic tariff proxies of 25% or 50%. The modeled Mexican lanes use a zero-duty assumption. The U.S. module receives a hypothetical USD 250 supplier discount, equivalent to full pass-through of USD 10/kWh for an eligible 25 kWh cell-based module. The modeled PCS discount is zero. [USTR Section 301 notice](https://www.govinfo.gov/app/details/FR-2024-09-18/2024-21217) · [CBP USMCA guidance](https://trade.cbp.gov/USMCA/s/faqs) · [26 U.S.C. § 45X](https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title26-section45X)
 - **Air eligibility.** The benchmark excludes air shipments for standalone LFP modules. [PHMSA lithium battery shipping guide](https://www.phmsa.dot.gov/lithiumbatteries)
 
 ## Author & Citation
