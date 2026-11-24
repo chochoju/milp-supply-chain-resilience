@@ -5,6 +5,8 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![Solver: HiGHS](https://img.shields.io/badge/Solver-HiGHS-teal)](https://highs.dev/)
 [![Stress scenarios: 132](https://img.shields.io/badge/Stress%20scenarios-132-orange)](#non-anticipative-monte-carlo-stress-test)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Domain: Clean-Tech Supply Chain](https://img.shields.io/badge/Domain-U.S.%20Manufacturing%20OR-orange.svg)](#empirical-calibration--governing-standards)
 
 ## Overview
 
@@ -18,18 +20,29 @@ The benchmark follows a U.S. battery energy storage system (BESS) assembly plant
 
 ## Repository Structure
 
-| Path | Contents |
-| --- | --- |
-| [`data/components.csv`](data/components.csv) | Bill of materials quantities, synthetic unit costs, packaged weights, and volumes |
-| [`data/suppliers_lanes.csv`](data/suppliers_lanes.csv) | 68 component-specific supplier and freight options |
-| [`data/weekly_demand_capacity.csv`](data/weekly_demand_capacity.csv) | Forecast and realized demand, plus weekly supplier capacity |
-| [`data/in_transit_pipeline.csv`](data/in_transit_pipeline.csv) | Pre-horizon purchase orders scheduled to arrive in weeks 1–4 |
-| [`figures/`](figures/) | Four benchmark and sensitivity figures |
-| [`results/`](results/) | Base-case comparison, 132 stress scenarios, and backlog-penalty sensitivity |
-| [`src/generate_supply_chain_data.py`](src/generate_supply_chain_data.py) | Synthetic data generator |
-| [`src/optimize_inventory_milp.py`](src/optimize_inventory_milp.py) | Five-policy benchmark, stress test, and figure generation |
-| [`src/test_inventory_timing.py`](src/test_inventory_timing.py) | Regression tests for lead times, carried backlog, the horizon boundary, and FIFO fill rate |
-| [`requirements.txt`](requirements.txt) | Tested dependency versions |
+```text
+milp-supply-chain-resilience/
+├── data/
+│   ├── components.csv                       # Six components for a 100 kWh BESS and their cost and weight inputs
+│   ├── suppliers_lanes.csv                  # 68 component-specific supplier and freight options
+│   ├── weekly_demand_capacity.csv           # 26-week demand forecasts, realized demand, and supplier capacity
+│   └── in_transit_pipeline.csv              # Pre-horizon purchase orders scheduled to arrive in weeks 1–4
+├── figures/
+│   ├── fig1_cost_breakdown_benchmark.png    # Five-policy cost breakdown and on-time component fill rate
+│   ├── fig2_inventory_disruption_dynamics.png # LFP module inventory and backlog during the base disruption
+│   ├── fig3_sourcing_mix_and_montecarlo.png   # Regional sourcing mix and modeled savings across 132 scenarios
+│   └── fig4_policy_sensitivity_frontier.png  # Perfect-foresight sensitivity to modeled discounts and tariffs
+├── results/
+│   ├── benchmark_comparison.csv             # 26-week financial and operational results for five policies
+│   ├── monte_carlo_stress_test.csv           # 132 port-strike and demand scenarios
+│   └── backlog_penalty_sensitivity.csv      # Base-case results at four backlog penalty levels
+├── src/
+│   ├── generate_supply_chain_data.py        # Synthetic BESS benchmark generator (seed=42)
+│   ├── optimize_inventory_milp.py           # HiGHS rolling-horizon MILP, heuristics, and stress test
+│   └── test_inventory_timing.py             # Lead-time, horizon, backlog, and FIFO fill-rate tests
+├── requirements.txt                         # Tested Python dependency versions
+└── README.md                               # Project overview and reproducibility instructions
+```
 
 ## Optimization & Simulation Architecture
 
