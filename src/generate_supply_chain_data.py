@@ -8,22 +8,15 @@ Incorporates Real-World OCEMA Container, Chassis & Fleet Payload Physics:
     * 20ft_Dry_TriAxle   : 19,960 kg (44,000 lbs) max gross cargo (+chassis fee)
     * 40ft_HC_Gooseneck  : 19,820 kg (43,700 lbs) max gross cargo
   All container payload checks evaluate gross packaged unit weight (net product
-  weight + 7% pallets, crating, blocking, bracing, and dunnage per OCEMA guidelines).
+  weight + 7% pallets, crating, blocking, bracing, and dunnage as a synthetic tare allowance).
 - U.S. Domestic & USMCA Ground: Flexible North American fleet options including
   53-ft Dry Van FTL (95 m3 usable, 19,500 kg gross payload), 26-ft Box Truck
   (45 m3 usable, 4,535 kg gross payload), and LTL Palletized Lots.
 - Expedited Air Cargo: Air PMC/ULD pallet lots (1-week transit).
 
-Empirical Calibration Sources (2025-2026):
-- Component & Regional Costs: NREL (2025) Utility-Scale Battery Storage Update
-  (NREL/TP-6A40-93281) & BNEF Stationary Storage Survey.
-- U.S. Import Tariffs: USTR Section 301 Modifications (89 FR 76581, Jan 1, 2026:
-  25% on non-EV Li-ion batteries/parts, 50% on power semiconductors).
-- Domestic Content Credits: IRS IRC Section 45X (26 U.S.C. § 45X: $35/kWh cells +
-  $10/kWh modules; $0.02/W inverters).
-- Ocean, Air & Ground Rates: Freightos Baltic Index (FBX01), Freightos Air Index
-  (FAX), and OCEMA / Maersk U.S. Highway Weight Guidelines.
-- Holding & Stockout Penalties: ASCM (APICS) & CSCMP working capital benchmarks.
+Scenario inputs are synthetic. OCEMA recommendations provide drayage payload
+reference values. Tariff proxies and a hypothetical U.S. module price
+discount are scenario assumptions. The generator excludes air for LFP modules.
 
 Seed: 42
 """
@@ -61,8 +54,8 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
     # -------------------------------------------------------------------------
     # 1. COMPONENT MASTER TABLE (6 Critical Sub-Assemblies per 100 kWh BESS Unit)
     # -------------------------------------------------------------------------
-    # Line-stoppage penalty (stockout_penalty_wk) calibrated to ~1.25x unit value/wk
-    # reflecting U.S. factory fixed-overhead absorption + utility delivery SLA penalties.
+    # Line-stoppage penalty (stockout_penalty_wk) set near 1.25x offshore unit value per week
+    # as a scenario assumption for the cost of persistent shortages.
     components_data = [
         {
             "component_id": "CMP_LFP_MOD",
@@ -74,11 +67,11 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "gross_unit_weight_kg": round(185.0 * PACKAGING_TARE_MULTIPLIER, 2),
             "unit_volume_m3": 0.42,
             "holding_cost_wk": 10.50,      # ~0.45%/wk capital + climate storage
-            "stockout_penalty_wk": 2650.0, # True assembly line-stoppage + SLA penalty
+            "stockout_penalty_wk": 2650.0, # Modeled component backlog penalty
             "initial_inventory": 260,
             "target_ending_ss": 200,
-            "sec301_tariff_rate": 0.25,    # 25% USTR Section 301 (Jan 1, 2026)
-            "sec45x_credit_unit": 875.0,   # $35/kWh domestic cell-to-module offset
+            "sec301_tariff_rate": 0.25,    # Synthetic offshore tariff proxy
+            "sec45x_credit_unit": 250.0,   # Hypothetical full pass-through of $10/kWh for an eligible cell-based module
         },
         {
             "component_id": "CMP_PCS_INV",
@@ -93,8 +86,8 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "stockout_penalty_wk": 3950.0,
             "initial_inventory": 70,
             "target_ending_ss": 55,
-            "sec301_tariff_rate": 0.50,    # 50% USTR Section 301 on semiconductors
-            "sec45x_credit_unit": 1000.0,  # $0.02/W AC * 50,000 W (IRC §45X)
+            "sec301_tariff_rate": 0.50,    # Synthetic offshore tariff proxy
+            "sec45x_credit_unit": 0.0,     # PCS eligibility is unspecified in this benchmark
         },
         {
             "component_id": "CMP_BMS_CTL",
@@ -109,7 +102,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "stockout_penalty_wk": 1150.0,
             "initial_inventory": 85,
             "target_ending_ss": 65,
-            "sec301_tariff_rate": 0.50,    # 50% semiconductor tariff exposure
+            "sec301_tariff_rate": 0.50,    # Synthetic offshore tariff proxy
             "sec45x_credit_unit": 0.0,
         },
         {
@@ -125,7 +118,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "stockout_penalty_wk": 680.0,
             "initial_inventory": 150,
             "target_ending_ss": 110,
-            "sec301_tariff_rate": 0.25,    # 25% Section 301 aluminum/battery part tariff
+            "sec301_tariff_rate": 0.25,    # Synthetic offshore tariff proxy
             "sec45x_credit_unit": 0.0,
         },
         {
@@ -146,7 +139,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
         },
         {
             "component_id": "CMP_ENC_CAB",
-            "name": "NEMA 3R Fire-Rated Steel Enclosure",
+            "name": "NEMA Type 3R Steel Enclosure",
             "category": "Structural BOS",
             "units_per_bess": 1,
             "base_apac_unit_cost": 1150.0,
@@ -157,7 +150,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "stockout_penalty_wk": 1650.0,
             "initial_inventory": 65,
             "target_ending_ss": 50,
-            "sec301_tariff_rate": 0.25,    # 25% Section 301 steel products tariff
+            "sec301_tariff_rate": 0.25,    # Synthetic offshore tariff proxy
             "sec45x_credit_unit": 0.0,
         },
     ]
@@ -179,7 +172,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 17780.0,  # OCEMA 20ft Dry on Standard Slider
             "price_multiplier": 1.00,
             "tariff_applies": True,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 6,
             "equipment_flat_freight": 2950.0,
             "per_kg_freight": 0.0,
@@ -197,7 +190,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 19960.0,  # OCEMA 20ft Dry on Tri-Axle Slider
             "price_multiplier": 1.00,
             "tariff_applies": True,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 6,
             "equipment_flat_freight": 3170.0,   # Includes +$220 tri-axle chassis split fee
             "per_kg_freight": 0.0,
@@ -215,7 +208,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 19820.0,  # OCEMA 40ft High Cube on Standard GN
             "price_multiplier": 0.985,
             "tariff_applies": True,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 6,
             "equipment_flat_freight": 4150.0,
             "per_kg_freight": 0.0,
@@ -233,7 +226,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 1500.0,
             "price_multiplier": 1.00,
             "tariff_applies": True,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 1,
             "equipment_flat_freight": 0.0,
             "per_kg_freight": 5.80,
@@ -252,7 +245,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 19960.0,
             "price_multiplier": 1.06,
             "tariff_applies": True,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 5,
             "equipment_flat_freight": 3320.0,
             "per_kg_freight": 0.0,
@@ -270,7 +263,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 19820.0,
             "price_multiplier": 1.045,
             "tariff_applies": True,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 5,
             "equipment_flat_freight": 4350.0,
             "per_kg_freight": 0.0,
@@ -288,7 +281,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 1500.0,
             "price_multiplier": 1.06,
             "tariff_applies": True,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 1,
             "equipment_flat_freight": 0.0,
             "per_kg_freight": 6.10,
@@ -307,7 +300,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 19500.0,
             "price_multiplier": 1.21,
             "tariff_applies": False,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 2,
             "equipment_flat_freight": 2400.0,
             "per_kg_freight": 0.0,
@@ -325,7 +318,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 4500.0,
             "price_multiplier": 1.22,
             "tariff_applies": False,
-            "sec45x_eligible": False,
+            "module_discount_applies": False,
             "lead_time_wks": 1,
             "equipment_flat_freight": 1650.0,
             "per_kg_freight": 0.0,
@@ -344,7 +337,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 19500.0,
             "price_multiplier": 1.40,
             "tariff_applies": False,
-            "sec45x_eligible": True,
+            "module_discount_applies": True,
             "lead_time_wks": 1,
             "equipment_flat_freight": 1450.0,
             "per_kg_freight": 0.0,
@@ -362,7 +355,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 4535.0,
             "price_multiplier": 1.42,
             "tariff_applies": False,
-            "sec45x_eligible": True,
+            "module_discount_applies": True,
             "lead_time_wks": 1,
             "equipment_flat_freight": 780.0,
             "per_kg_freight": 0.0,
@@ -380,7 +373,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
             "max_gross_payload_kg": 2500.0,
             "price_multiplier": 1.43,
             "tariff_applies": False,
-            "sec45x_eligible": True,
+            "module_discount_applies": True,
             "lead_time_wks": 1,
             "equipment_flat_freight": 540.0,
             "per_kg_freight": 0.0,
@@ -392,6 +385,8 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
     lanes_rows = []
     for _, comp in df_components.iterrows():
         for opt in shipping_options:
+            if comp["component_id"] == "CMP_LFP_MOD" and opt["freight_mode"] == "exp":
+                continue
             lot_units, binding_constraint = compute_equipment_capacity(
                 unit_volume_m3=comp["unit_volume_m3"],
                 gross_unit_weight_kg=comp["gross_unit_weight_kg"],
@@ -410,7 +405,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
                 else 0.0
             )
             domestic_credit = (
-                comp["sec45x_credit_unit"] if opt["sec45x_eligible"] else 0.0
+                comp["sec45x_credit_unit"] if opt["module_discount_applies"] else 0.0
             )
 
             if opt["equipment_flat_freight"] > 0:
@@ -550,7 +545,7 @@ def generate_supply_chain_benchmark(output_dir: str = "data", seed: int = 42) ->
     df_schedule.to_csv(os.path.join(output_dir, "weekly_demand_capacity.csv"), index=False)
     df_pipeline.to_csv(os.path.join(output_dir, "in_transit_pipeline.csv"), index=False)
 
-    print(f"[SUCCESS] Generated OCEMA-Calibrated Dataset in '{output_dir}/' (seed={seed}):")
+    print(f"[SUCCESS] Generated Synthetic Supply-Chain Dataset in '{output_dir}/' (seed={seed}):")
     print(f"  - components.csv              : {len(df_components)} components")
     print(f"  - suppliers_lanes.csv         : {len(df_lanes)} lane/chassis equipment options")
     print(f"  - weekly_demand_capacity.csv  : {len(df_schedule)} weekly schedule records (T=26 wks)")

@@ -14,12 +14,16 @@ Methodological Architecture:
    - Policy C : Non-Anticipative Rolling-Horizon MILP (Primary Operational Benchmark;
                 uses forecast demand & explicit 2-week strike recovery belief)
    - Policy D : Perfect-Foresight Reference MILP (Clairvoyant benchmark)
-3. Automated Non-Anticipativity Verification Test & N=50 Monte Carlo Stress Test.
+3. Automated Non-Anticipativity Verification Test & balanced Monte Carlo Stress Test.
 4. Exports 4 300-DPI figures in `figures/` and CSVs in `results/`.
 
 Seed: 42
 """
 
+import argparse
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+from multiprocessing import get_context
 import os
 import time
 import math
@@ -50,15 +54,13 @@ def load_data(data_dir: str = "data") -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
     return df_comp, df_lanes, df_sched, df_pipe
 
 
-def compute_incremental_fill_rate(B_mat: np.ndarray, demand_mat: np.ndarray) -> float:
-    """
-    Computes true on-time assembly line fill rate (%) from incremental weekly
-    shortages max(0, B_{i,t} - B_{i,t-1}) so carried-over backlog is not double-counted.
-    """
-    prev_B = np.hstack([np.zeros((B_mat.shape[0], 1)), B_mat[:, :-1]])
-    new_shortages = np.maximum(0.0, B_mat - prev_B)
-    total_demand = float(np.sum(demand_mat))
-    return max(0.0, 100.0 * (1.0 - float(np.sum(new_shortages)) / total_demand))
+def compute_component_fill_rate(backlog: np.ndarray, demand: np.ndarray) -> float:
+    """Share of current demand served in its due week under FIFO fulfillment."""
+    total_demand = float(np.sum(demand))
+    if total_demand == 0:
+        return 100.0
+    current_demand_unfilled = np.minimum(backlog, demand)
+    return 100.0 * (1.0 - float(np.sum(current_demand_unfilled)) / total_demand)
 
 
 def solve_milp_subproblem(
@@ -73,13 +75,14 @@ def solve_milp_subproblem(
     warehouse_max_m3: float = 480.0,
     sec45x_multiplier: float = 1.0,
     tariff_multiplier: float = 1.0,
-    enforce_ending_ss: bool = True,
+    inventory_week_offset: int = 0,
     mip_rel_gap: float = 2e-3,
     time_limit: float = 10.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, int]:
     """
     Core HiGHS MILP solver over a given remaining horizon of length `horizon_len`.
-    Strictly uses passed `demand_future` and `cap_future` (no external data access).
+    The inventory week offset maps inventory periods to order weeks. It is one
+    in rolling mode, where inventory is first projected for the following week.
     """
     t_start = time.perf_counter()
 
@@ -142,7 +145,8 @@ def solve_milp_subproblem(
                 sup_cap *= 1.5
             effective_cap = min(sup_cap, peak_4wk_demand)
 
-            max_lots = max(0, math.floor(effective_cap / lot_units))
+            arrives_in_horizon = tau + int(lane["lead_time_wks"]) - inventory_week_offset < H
+            max_lots = max(0, math.floor(effective_cap / lot_units)) if arrives_in_horizon else 0
             ub[v_n] = float(max_lots)
             if max_lots < lane["min_lots"]:
                 ub[v_y] = 0.0
@@ -151,8 +155,6 @@ def solve_milp_subproblem(
         for tau in range(H):
             c_obj[idx_I(i_idx, tau)] = comp["holding_cost_wk"]
             c_obj[idx_B(i_idx, tau)] = comp["stockout_penalty_wk"]
-            if enforce_ending_ss and tau == H - 1:
-                lb[idx_I(i_idx, tau)] = float(comp["target_ending_ss"])
 
     rows = []
     rhs_l = []
@@ -175,7 +177,7 @@ def solve_milp_subproblem(
 
             for l_idx, lane in lanes_by_comp[cid]:
                 lead = int(lane["lead_time_wks"])
-                order_tau = tau - lead
+                order_tau = tau + inventory_week_offset - lead
                 if order_tau >= 0:
                     row[idx_N(l_idx, order_tau)] = row.get(idx_N(l_idx, order_tau), 0.0) - float(lane["lot_size_units"])
 
@@ -220,6 +222,12 @@ def solve_milp_subproblem(
             rows.append(row)
             rhs_l.append(-np.inf)
             rhs_u.append(effective_cap)
+            if has_exp:
+                standard = {idx_N(l_idx, tau): float(lane["lot_size_units"])
+                            for l_idx, lane in lane_list if lane["freight_mode"] == "std"}
+                rows.append(standard)
+                rhs_l.append(-np.inf)
+                rhs_u.append(cap_val)
 
     # Constraint 4: Warehouse Physical Cubic Capacity
     for tau in range(H):
@@ -317,13 +325,15 @@ def evaluate_cost_and_kpis(
         if not df_orders.empty
         else 0.0
     )
-    fill_rate_pct = compute_incremental_fill_rate(B_hist, demand_arr)
+    fill_rate_pct = compute_component_fill_rate(B_hist, demand_arr)
     wh_vol_by_wk = np.sum(I_hist * df_comp["unit_volume_m3"].values[:, None], axis=0)
     peak_wh_util_pct = float(100.0 * np.max(wh_vol_by_wk) / warehouse_max_m3)
 
     return {
         "solve_time_sec": solve_time_sec,
         "total_net_cost": total_net_cost,
+        "cost_before_backlog_penalty": total_net_cost - cost_stockout,
+        "ending_backlog_units": float(B_hist[:, -1].sum()),
         "cost_procurement": cost_procurement,
         "cost_tariffs": cost_tariffs,
         "cost_credits": cost_credits,
@@ -356,16 +366,16 @@ def simulate_rolling_horizon_milp(
 ) -> dict:
     """
     Policy C: Non-Anticipative Rolling-Horizon MILP with End-of-Week Decision Clock.
-    At each week t = 0 .. T-1:
+    At each week t = 0 .. T-1 (ordering through T-2):
       1. Receive scheduled arrivals & apply realized demand D_{i,t}.
       2. Update ending inventory I_{i,t}, backlog B_{i,t}, and observe week t port capacity.
       3. Solve MILP over remaining future horizon [t+1 .. T-1] using:
          - Current state (I_{i,t}, B_{i,t}) and open pipeline arrivals
          - Forecast demand for future weeks (never realized future demand)
-         - Explicit 2-week recovery belief rule for port strikes:
+         - Recovery forecast for port strikes:
            * If no strike observed in week t: forecast nominal capacity for all future weeks.
-           * If strike observed in week t (Week 1 of strike): forecast reduced capacity
-             in t+1 (Week 2 of strike) and full nominal recovery in t+2 onward.
+           * If capacity is reduced at t, forecast the same reduction at t+1
+             and nominal capacity from t+2 onward.
       4. Execute ONLY week t's immediate container/trailer order decisions.
     """
     t_total_start = time.perf_counter()
@@ -421,6 +431,7 @@ def simulate_rolling_horizon_milp(
     bo = np.zeros(n_comp, dtype=float)
     orders_records = []
 
+    limited_solves = 0
     for t in range(T):
         # Step 1: Receive scheduled deliveries & apply week t realized demand
         inv += arrivals[:, t]
@@ -437,23 +448,13 @@ def simulate_rolling_horizon_milp(
         I_hist[:, t] = inv
         B_hist[:, t] = bo
 
-        # Step 3: Place end-of-week t orders via MILP lookahead over [t+1 .. T-1]
-        # Remaining demand periods to cover: H_rem = T - t
-        # Note: tau = 0 corresponds to orders placed at end of week t (arriving at t + L_l)
-        # and inventory transitions for weeks t+1 .. T-1 (plus terminal period).
-        H_rem = T - t
-        demand_rem = np.zeros((n_comp, H_rem))
-        pipe_rem = np.zeros((n_comp, H_rem))
+        if t == T - 1:
+            break
 
-        for tau in range(H_rem):
-            fut_t = t + 1 + tau
-            if fut_t < T:
-                demand_rem[:, tau] = forecast_demand_arr[:, fut_t]
-                pipe_rem[:, tau] = arrivals[:, fut_t]
-            else:
-                # Terminal boundary period mirrors week T-1 forecast
-                demand_rem[:, tau] = forecast_demand_arr[:, T - 1]
-                pipe_rem[:, tau] = arrivals[:, T]
+        # Order index zero is week t. Inventory index zero is week t+1.
+        H_rem = T - t - 1
+        demand_rem = forecast_demand_arr[:, t + 1 : T]
+        pipe_rem = arrivals[:, t + 1 : T]
 
         # Build non-anticipative capacity forecast using explicit 2-week recovery rule:
         # tau=0 is current ordering epoch (end of week t, governed by observed week t capacity).
@@ -476,7 +477,7 @@ def simulate_rolling_horizon_milp(
                     else:
                         cap_rem[(cid, sid, tau)] = nom_cap
 
-        N_sub, _, _, _, _, _ = solve_milp_subproblem(
+        N_sub, _, _, _, _, status = solve_milp_subproblem(
             df_comp=df_comp,
             df_lanes=df_lanes,
             init_inv_arr=inv,
@@ -488,10 +489,11 @@ def simulate_rolling_horizon_milp(
             warehouse_max_m3=warehouse_max_m3,
             sec45x_multiplier=sec45x_multiplier,
             tariff_multiplier=tariff_multiplier,
-            enforce_ending_ss=True,
+            inventory_week_offset=1,
             mip_rel_gap=mip_rel_gap,
             time_limit=4.0,
         )
+        limited_solves += int(status != 0)
 
         # Step 4: Execute ONLY tau = 0 (end-of-week t) order decisions
         for l_idx, lane in enumerate(lanes):
@@ -517,7 +519,7 @@ def simulate_rolling_horizon_milp(
                 )
 
     total_time = time.perf_counter() - t_total_start
-    return evaluate_cost_and_kpis(
+    outcome = evaluate_cost_and_kpis(
         df_comp=df_comp,
         df_lanes=df_lanes,
         I_hist=I_hist,
@@ -529,6 +531,8 @@ def simulate_rolling_horizon_milp(
         tariff_multiplier=tariff_multiplier,
         solve_time_sec=total_time,
     )
+    outcome["limits_reached"] = limited_solves
+    return outcome
 
 
 def solve_perfect_foresight_milp(
@@ -577,7 +581,6 @@ def solve_perfect_foresight_milp(
         warehouse_max_m3=warehouse_max_m3,
         sec45x_multiplier=sec45x_multiplier,
         tariff_multiplier=tariff_multiplier,
-        enforce_ending_ss=True,
         mip_rel_gap=mip_rel_gap,
         time_limit=15.0,
     )
@@ -661,11 +664,12 @@ def simulate_heuristic_policy(
             & (df_lanes["supplier_id"] == "SUP_APAC_1")
             & (df_lanes["equipment_type"] == "20ft_Dry_TriAxle")
         ].iloc[0]
-        exp_apac = df_lanes[
+        air_lanes = df_lanes[
             (df_lanes["component_id"] == cid)
             & (df_lanes["supplier_id"] == "SUP_APAC_1")
             & (df_lanes["equipment_type"] == "Air_PMC_Pallet")
-        ].iloc[0]
+        ]
+        air_lane = None if air_lanes.empty else air_lanes.iloc[0]
         usa_box = df_lanes[
             (df_lanes["component_id"] == cid)
             & (df_lanes["supplier_id"] == "SUP_USA_1")
@@ -706,7 +710,10 @@ def simulate_heuristic_policy(
             I_hist[i_idx, t] = inv
             B_hist[i_idx, t] = backorder
 
-            next_f_d = float(forecast_d[min(T - 1, t + 1)])
+            if t == T - 1:
+                break
+            next_f_d = float(forecast_d[t + 1])
+            air_qty = 0
             open_pipeline = float(np.sum(arrivals[t + 1 : t + 1 + L_apac]))
             inv_position = inv - backorder + open_pipeline
 
@@ -721,7 +728,7 @@ def simulate_heuristic_policy(
                     target_usa = max(0.0, 2.2 * next_f_d - (inv - backorder + arrivals[t + 1]))
                     lot_u = int(usa_box["lot_size_units"])
                     n_lots = min(math.ceil(target_usa / lot_u), math.floor(usa_cap[t] / lot_u))
-                    if n_lots >= 1:
+                    if n_lots >= 1 and t + int(usa_box["lead_time_wks"]) < T:
                         qty = n_lots * lot_u
                         arrivals[t + int(usa_box["lead_time_wks"])] += qty
                         inv_position += qty
@@ -744,7 +751,7 @@ def simulate_heuristic_policy(
                     gap_mex = max(0.0, s_reorder - inv_position)
                     lot_m = int(mex_ftl["lot_size_units"])
                     n_lots_m = min(math.ceil(gap_mex / lot_m), math.floor(mex_cap[t] / lot_m))
-                    if n_lots_m >= 1:
+                    if n_lots_m >= 1 and t + int(mex_ftl["lead_time_wks"]) < T:
                         qty_m = n_lots_m * lot_m
                         arrivals[t + int(mex_ftl["lead_time_wks"])] += qty_m
                         inv_position += qty_m
@@ -762,34 +769,37 @@ def simulate_heuristic_policy(
                             }
                         )
 
-            elif mode == "reactive_air":
-                if inv - backorder < 1.1 * next_f_d:
+            elif mode == "reactive_air" and air_lane is not None:
+                air_lead = int(air_lane["lead_time_wks"])
+                if t + air_lead < T and inv - backorder < 1.1 * next_f_d:
                     gap_air = max(0.0, 1.6 * next_f_d - (inv - backorder))
-                    air_lot = int(exp_apac["lot_size_units"])
-                    n_air_lots = max(1, math.ceil(gap_air / air_lot))
+                    air_lot = int(air_lane["lot_size_units"])
+                    n_air_lots = min(math.ceil(gap_air / air_lot), math.floor(1.5 * apac_cap[t] / air_lot))
                     air_qty = n_air_lots * air_lot
-                    arrivals[t + int(exp_apac["lead_time_wks"])] += air_qty
-                    inv_position += air_qty
-                    orders_records.append(
-                        {
-                            "week": t + 1,
-                            "lane_id": exp_apac["lane_id"],
-                            "component_id": cid,
-                            "supplier_id": "SUP_APAC_1",
-                            "supplier_region": "Offshore_APAC",
-                            "freight_mode": "exp",
-                            "equipment_type": "Air_PMC_Pallet",
-                            "lots": n_air_lots,
-                            "order_qty": air_qty,
-                        }
-                    )
+                    if air_qty:
+                        arrivals[t + air_lead] += air_qty
+                        inv_position += air_qty
+                        orders_records.append(
+                            {
+                                "week": t + 1,
+                                "lane_id": air_lane["lane_id"],
+                                "component_id": cid,
+                                "supplier_id": "SUP_APAC_1",
+                                "supplier_region": "Offshore_APAC",
+                                "freight_mode": "exp",
+                                "equipment_type": "Air_PMC_Pallet",
+                                "lots": n_air_lots,
+                                "order_qty": air_qty,
+                            }
+                        )
 
             # Standard Ocean (s, S) Replenishment
-            if inv_position <= s_reorder:
+            if inv_position <= s_reorder and t + L_apac < T:
                 target_qty = max(0.0, S_order_up_to - inv_position)
                 ocean_lot = int(std_apac["lot_size_units"])
                 n_ocean_lots = max(1, math.ceil(target_qty / ocean_lot))
-                max_cap_lots = math.floor(apac_cap[t] / ocean_lot)
+                remaining_cap = min(apac_cap[t], 1.5 * apac_cap[t] - air_qty)
+                max_cap_lots = math.floor(remaining_cap / ocean_lot)
                 n_ocean_lots = min(n_ocean_lots, max_cap_lots)
 
                 if n_ocean_lots >= 1:
@@ -847,70 +857,83 @@ def verify_non_anticipativity(
     print(f"[VERIFIED] Non-Anticipativity Test Passed: Identical Rolling-Horizon MILP orders through Week {split_week}.")
 
 
+def evaluate_stress_scenario(scenario, df_comp, df_lanes, df_sched, df_pipe) -> dict:
+    trial, shock_start, shock_dur, demand_mult = scenario
+    shock_end = shock_start + shock_dur - 1
+    df_sched_mc = df_sched.copy()
+    for _, comp in df_comp.iterrows():
+        cid = comp["component_id"]
+        base_apac_cap = int(round(45 * comp["units_per_bess"] * 1.50))
+        mask_apac_comp = (df_sched_mc["component_id"] == cid) & (df_sched_mc["supplier_region"] == "Offshore_APAC")
+        df_sched_mc.loc[mask_apac_comp, "weekly_supply_cap"] = base_apac_cap
+
+    units_per_bess = df_sched_mc["component_id"].map(
+        df_comp.set_index("component_id")["units_per_bess"]
+    )
+    for t in range(1, 27):
+        mask_t = df_sched_mc["week"] == t
+        forecast_builds = df_sched_mc.loc[mask_t, "forecast_demand"] / units_per_bess[mask_t]
+        actual_builds = np.maximum(1, np.round(forecast_builds * demand_mult[t - 1]))
+        df_sched_mc.loc[mask_t, "actual_demand"] = (actual_builds * units_per_bess[mask_t]).astype(int)
+
+        mask_apac = mask_t & (df_sched_mc["supplier_region"] == "Offshore_APAC")
+        if shock_start <= t <= shock_end:
+            df_sched_mc.loc[mask_apac, "weekly_supply_cap"] = np.round(
+                df_sched_mc.loc[mask_apac, "weekly_supply_cap"] * 0.15
+            ).astype(int)
+
+    res_static = simulate_heuristic_policy(df_comp, df_lanes, df_sched_mc, df_pipe, mode="static_ocean")
+    res_air = simulate_heuristic_policy(df_comp, df_lanes, df_sched_mc, df_pipe, mode="reactive_air")
+    res_dual_h = simulate_heuristic_policy(df_comp, df_lanes, df_sched_mc, df_pipe, mode="dual_sourced")
+    res_rh_milp = simulate_rolling_horizon_milp(df_comp, df_lanes, df_sched_mc, df_pipe, mip_rel_gap=5e-3)
+
+    return {
+        "trial": trial,
+        "shock_start_wk": shock_start,
+        "shock_duration_wks": shock_dur,
+        "static_ss_cost": res_static["total_net_cost"],
+        "reactive_air_cost": res_air["total_net_cost"],
+        "dual_heuristic_cost": res_dual_h["total_net_cost"],
+        "rolling_milp_cost": res_rh_milp["total_net_cost"],
+        "savings_vs_static_pct": 100.0 * (res_static["total_net_cost"] - res_rh_milp["total_net_cost"]) / res_static["total_net_cost"],
+        "savings_vs_air_pct": 100.0 * (res_air["total_net_cost"] - res_rh_milp["total_net_cost"]) / res_air["total_net_cost"],
+        "savings_vs_dual_heur_pct": 100.0 * (res_dual_h["total_net_cost"] - res_rh_milp["total_net_cost"]) / res_dual_h["total_net_cost"],
+        "rolling_milp_fill_rate": res_rh_milp["fill_rate_pct"],
+        "rolling_milp_usa_share_pct": res_rh_milp["usa_share_pct"],
+        "rolling_milp_peak_warehouse_pct": res_rh_milp["peak_wh_util_pct"],
+        "rolling_solver_limits": res_rh_milp["limits_reached"],
+    }
+
+
 def run_monte_carlo_stress_test(
     df_comp: pd.DataFrame,
     df_lanes: pd.DataFrame,
     df_sched: pd.DataFrame,
     df_pipe: pd.DataFrame,
-    n_trials: int = 50,
+    paths_per_strike: int = 3,
     seed: int = 42,
+    workers: int = 1,
 ) -> pd.DataFrame:
-    """
-    Evaluates randomized unannounced port-strike timing (weeks 6-16), strike duration
-    (2-5 weeks), and stochastic demand volatility across N=50 trials comparing the
-    non-anticipative Rolling-Horizon MILP against traditional heuristics.
-    """
+    """Cross all 44 strike timings and durations with independent demand paths."""
     rng = np.random.default_rng(seed)
-    mc_rows = []
+    strike_cases = [(start, duration) for start in range(6, 17) for duration in range(2, 6)]
+    scenarios = [
+        (trial, start, duration, rng.normal(1.0, 0.08, size=26))
+        for trial, (start, duration) in enumerate(strike_cases * paths_per_strike, start=1)
+    ]
+    evaluate = partial(evaluate_stress_scenario, df_comp=df_comp, df_lanes=df_lanes,
+                       df_sched=df_sched, df_pipe=df_pipe)
+    if workers == 1:
+        return pd.DataFrame(map(evaluate, scenarios))
+    records = []
+    # Start clean interpreters so workers do not inherit the native HiGHS scheduler.
+    with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn")) as pool:
+        for record in pool.map(evaluate, scenarios):
+            records.append(record)
+            if len(records) % 12 == 0:
+                print(f"  Completed {len(records)} of {len(scenarios)} scenarios", flush=True)
+    return pd.DataFrame(records)
 
-    for trial in range(1, n_trials + 1):
-        shock_start = int(rng.integers(6, 17))
-        shock_dur = int(rng.integers(2, 6))
-        shock_end = min(26, shock_start + shock_dur - 1)
-        demand_mult = rng.normal(1.0, 0.08, size=26)
-
-        df_sched_mc = df_sched.copy()
-        for _, comp in df_comp.iterrows():
-            cid = comp["component_id"]
-            base_apac_cap = int(round(45 * comp["units_per_bess"] * 1.50))
-            mask_apac_comp = (df_sched_mc["component_id"] == cid) & (df_sched_mc["supplier_region"] == "Offshore_APAC")
-            df_sched_mc.loc[mask_apac_comp, "weekly_supply_cap"] = base_apac_cap
-
-        for t in range(1, 27):
-            mask_t = df_sched_mc["week"] == t
-            df_sched_mc.loc[mask_t, "actual_demand"] = np.maximum(
-                5, np.round(df_sched_mc.loc[mask_t, "forecast_demand"] * demand_mult[t - 1])
-            ).astype(int)
-
-            mask_apac = mask_t & (df_sched_mc["supplier_region"] == "Offshore_APAC")
-            if shock_start <= t <= shock_end:
-                df_sched_mc.loc[mask_apac, "weekly_supply_cap"] = np.round(
-                    df_sched_mc.loc[mask_apac, "weekly_supply_cap"] * 0.15
-                ).astype(int)
-
-        res_static = simulate_heuristic_policy(df_comp, df_lanes, df_sched_mc, df_pipe, mode="static_ocean")
-        res_air = simulate_heuristic_policy(df_comp, df_lanes, df_sched_mc, df_pipe, mode="reactive_air")
-        res_dual_h = simulate_heuristic_policy(df_comp, df_lanes, df_sched_mc, df_pipe, mode="dual_sourced")
-        res_rh_milp = simulate_rolling_horizon_milp(df_comp, df_lanes, df_sched_mc, df_pipe, mip_rel_gap=5e-3)
-
-        mc_rows.append(
-            {
-                "trial": trial,
-                "shock_start_wk": shock_start,
-                "shock_duration_wks": shock_dur,
-                "static_ss_cost": res_static["total_net_cost"],
-                "reactive_air_cost": res_air["total_net_cost"],
-                "dual_heuristic_cost": res_dual_h["total_net_cost"],
-                "rolling_milp_cost": res_rh_milp["total_net_cost"],
-                "savings_vs_static_pct": 100.0 * (res_static["total_net_cost"] - res_rh_milp["total_net_cost"]) / res_static["total_net_cost"],
-                "savings_vs_air_pct": 100.0 * (res_air["total_net_cost"] - res_rh_milp["total_net_cost"]) / res_air["total_net_cost"],
-                "savings_vs_dual_heur_pct": 100.0 * (res_dual_h["total_net_cost"] - res_rh_milp["total_net_cost"]) / res_dual_h["total_net_cost"],
-                "rolling_milp_fill_rate": res_rh_milp["fill_rate_pct"],
-                "rolling_milp_usa_share_pct": res_rh_milp["usa_share_pct"],
-            }
-        )
-
-    return pd.DataFrame(mc_rows)
 
 
 def generate_figures(
@@ -954,14 +977,14 @@ def generate_figures(
     x = np.arange(len(policies))
     w = 0.54
 
-    ax1.bar(x, net_proc, w, label="Net Procurement & §301 Tariffs (less §45X)", color="#2B5B84")
+    ax1.bar(x, net_proc, w, label="Net procurement and modeled import costs", color="#2B5B84")
     ax1.bar(x, std_frt, w, bottom=net_proc, label="Standard Ocean/Ground Freight & Setup", color="#5C9EAD")
     b2 = np.array(net_proc) + np.array(std_frt)
     ax1.bar(x, exp_frt, w, bottom=b2, label="Emergency Air Expedite Freight", color="#E07A5F")
     b3 = b2 + np.array(exp_frt)
     ax1.bar(x, holding, w, bottom=b3, label="Inventory Holding Cost", color="#81B29A")
     b4 = b3 + np.array(holding)
-    ax1.bar(x, stockout, w, bottom=b4, label="Line-Stoppage / Backorder Penalties", color="#D62828")
+    ax1.bar(x, stockout, w, bottom=b4, label="Component backlog penalties", color="#D62828")
 
     totals = b4 + np.array(stockout)
     for idx, tot in enumerate(totals):
@@ -970,7 +993,7 @@ def generate_figures(
     ax1.set_xticks(x)
     ax1.set_xticklabels(policies, fontsize=9.0, fontweight="bold")
     ax1.set_ylabel("Total 26-Week Supply-Chain Cost ($ Millions)", fontsize=10.5, fontweight="bold")
-    ax1.set_title("A. Total Landed Cost & Penalty Decomposition", fontsize=11.5, fontweight="bold", pad=10)
+    ax1.set_title("A. Modeled Cost and Backlog Penalties", fontsize=11.5, fontweight="bold", pad=10)
     ax1.set_ylim(0, max(totals) * 1.18)
     ax1.grid(axis="y")
     ax1.legend(loc="upper right", fontsize=8.0, frameon=True)
@@ -983,8 +1006,8 @@ def generate_figures(
 
     ax2.set_xticks(x)
     ax2.set_xticklabels(["A:\nStatic", "B1:\nAir", "B2:\nDual-H", "C:\nRH-MILP", "D:\nPF-Ref"], fontsize=9.0, fontweight="bold")
-    ax2.set_ylabel("On-Time Assembly Line Fill Rate (%)", fontsize=10.5, fontweight="bold")
-    ax2.set_title("B. Production Line Service Level", fontsize=11.5, fontweight="bold", pad=10)
+    ax2.set_ylabel("On-Time Component Fill Rate (%)", fontsize=10.5, fontweight="bold")
+    ax2.set_title("B. Component Service Level", fontsize=11.5, fontweight="bold", pad=10)
     ax2.set_ylim(0, 112)
     ax2.grid(axis="y")
 
@@ -1012,7 +1035,7 @@ def generate_figures(
     ax1.plot(weeks, res_static["I_sol"][lfp_idx], "o--", color="#D62828", lw=1.8, markersize=4, label="A: Static (s, S) Ocean")
     ax1.plot(weeks, res_dual_h["I_sol"][lfp_idx], "^-.", color="#457B9D", lw=1.8, markersize=4, label="B2: Dual-Sourced Heuristic")
     ax1.plot(weeks, res_rh_milp["I_sol"][lfp_idx], "D-", color="#2A9D8F", lw=2.4, markersize=5, label="C: Rolling-Horizon MILP (Online)")
-    ax1.plot(weeks, res_rh_milp["demand_arr"][lfp_idx], ":", color="#333333", lw=1.8, label="Weekly Plant Assembly Demand")
+    ax1.plot(weeks, res_rh_milp["demand_arr"][lfp_idx], ":", color="#333333", lw=1.8, label="Weekly module demand")
 
     ax1.set_ylabel("LFP Battery Modules (Units)", fontsize=10.5, fontweight="bold")
     ax1.set_title("A. On-Hand Inventory Buffer Trajectory (25 kWh LFP Battery Modules)", fontsize=11.5, fontweight="bold")
@@ -1029,8 +1052,8 @@ def generate_figures(
     ax2.plot(weeks, res_rh_milp["B_sol"][lfp_idx], color="#2A9D8F", lw=2.8, label="C: Rolling-Horizon MILP Shortage")
 
     ax2.set_xlabel("Planning Horizon (Week)", fontsize=10.5, fontweight="bold")
-    ax2.set_ylabel("Cumulative Backorders (Units)", fontsize=10.5, fontweight="bold")
-    ax2.set_title("B. Assembly Line Stockout Exposure Under Compounding Port & Demand Shocks", fontsize=11.5, fontweight="bold")
+    ax2.set_ylabel("Outstanding Backorders (Units)", fontsize=10.5, fontweight="bold")
+    ax2.set_title("B. LFP Module Backlog During Port and Demand Disruptions", fontsize=11.5, fontweight="bold")
     ax2.set_xticks(weeks)
     ax2.grid(True)
     ax2.legend(loc="upper left", fontsize=9, frameon=True)
@@ -1058,9 +1081,9 @@ def generate_figures(
     pct_mex = 100.0 * piv["Nearshore_USMCA"] / row_sums
     pct_usa = 100.0 * piv["Domestic_USA"] / row_sums
 
-    ax1.bar(weeks, pct_usa, label="U.S. Domestic (1-Wk Ground, §45X)", color="#1D3557")
-    ax1.bar(weeks, pct_mex, bottom=pct_usa, label="USMCA Nearshore (2-Wk Ground, 0% Tariff)", color="#457B9D")
-    ax1.bar(weeks, pct_apac, bottom=pct_usa + pct_mex, label="Offshore APAC (5–6 Wk Ocean, §301 Tariff)", color="#A8DADC")
+    ax1.bar(weeks, pct_usa, label="U.S. domestic", color="#1D3557")
+    ax1.bar(weeks, pct_mex, bottom=pct_usa, label="Mexico nearshore", color="#457B9D")
+    ax1.bar(weeks, pct_apac, bottom=pct_usa + pct_mex, label="Offshore APAC", color="#A8DADC")
     ax1.axvspan(11, 14.9, color="#E63946", alpha=0.18, label="Port Disruption Window")
 
     ax1.set_xlabel("Order Placement Week", fontsize=10.5, fontweight="bold")
@@ -1086,7 +1109,7 @@ def generate_figures(
         patch.set_facecolor(color)
         patch.set_alpha(0.78)
 
-    ax2.set_ylabel("26-Week Total Landed Cost Reduction (%)", fontsize=10.5, fontweight="bold")
+    ax2.set_ylabel("26-Week Modeled Total Cost Reduction (%)", fontsize=10.5, fontweight="bold")
     ax2.set_title(f"B. Non-Anticipative Monte Carlo Savings (N={len(df_mc)})", fontsize=11.5, fontweight="bold")
     ax2.grid(axis="y")
 
@@ -1116,13 +1139,13 @@ def generate_figures(
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.8, 5.0))
 
     pct_labels = [int(c * 100) for c in credit_scales]
-    ax1.plot(pct_labels, usa_shares_base, "o-", color="#1D3557", lw=2.4, label="Baseline 2026 USTR §301 Tariffs (25%–50%)")
+    ax1.plot(pct_labels, usa_shares_base, "o-", color="#1D3557", lw=2.4, label="Baseline tariff assumptions (25%–50%)")
     ax1.plot(pct_labels, usa_shares_high_tariff, "s--", color="#E63946", lw=2.2, label="Elevated Tariff Regime (+40% Escalation)")
-    ax1.axvline(100, color="#2A9D8F", linestyle=":", lw=1.8, label="Current IRC §45X Benchmark (100%)")
+    ax1.axvline(100, color="#2A9D8F", linestyle=":", lw=1.8, label="Baseline module discount (100%)")
 
-    ax1.set_xlabel("IRC §45X Domestic Manufacturing Credit Level (% of Statutory)", fontsize=10, fontweight="bold")
-    ax1.set_ylabel("Optimal U.S. Domestic Sourcing Share (%)", fontsize=10, fontweight="bold")
-    ax1.set_title("A. Domestic Reshoring Sensitivity to Policy Incentives", fontsize=11.5, fontweight="bold")
+    ax1.set_xlabel("Domestic module discount (% of baseline)", fontsize=10, fontweight="bold")
+    ax1.set_ylabel("U.S. Domestic Sourcing Share (%)", fontsize=10, fontweight="bold")
+    ax1.set_title("A. Perfect-Foresight Domestic Sourcing Share", fontsize=11.5, fontweight="bold")
     ax1.grid(True)
     ax1.legend(loc="lower right", fontsize=8.5, frameon=True)
 
@@ -1130,9 +1153,9 @@ def generate_figures(
     for x_v, y_v in zip(pct_labels, total_costs_base):
         ax2.annotate(f"${y_v:.2f}M", (x_v, y_v), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8.5, fontweight="bold")
 
-    ax2.set_xlabel("IRC §45X Domestic Manufacturing Credit Level (% of Statutory)", fontsize=10, fontweight="bold")
-    ax2.set_ylabel("26-Week Plant Landed Cost ($ Millions)", fontsize=10, fontweight="bold")
-    ax2.set_title("B. Net U.S. Manufacturing Landed Cost Curve", fontsize=11.5, fontweight="bold")
+    ax2.set_xlabel("Domestic module discount (% of baseline)", fontsize=10, fontweight="bold")
+    ax2.set_ylabel("26-Week Modeled Total Cost ($ Millions)", fontsize=10, fontweight="bold")
+    ax2.set_title("B. Perfect-Foresight Cost Sensitivity", fontsize=11.5, fontweight="bold")
     ax2.set_ylim(min(total_costs_base) * 0.94, max(total_costs_base) * 1.05)
     ax2.grid(True)
 
@@ -1142,6 +1165,12 @@ def generate_figures(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--paths-per-strike", type=int, default=3)
+    parser.add_argument("--workers", type=int, default=1)
+    args = parser.parse_args()
+    if args.paths_per_strike < 1 or args.workers < 1:
+        parser.error("paths per strike and workers must be positive")
     os.makedirs("results", exist_ok=True)
     df_comp, df_lanes, df_sched, df_pipe = load_data("data")
 
@@ -1161,7 +1190,7 @@ def main() -> None:
     res_rh_milp = simulate_rolling_horizon_milp(df_comp, df_lanes, df_sched, df_pipe, mip_rel_gap=3e-3)
 
     print("5. Solving Policy D: Perfect-Foresight Reference MILP...")
-    res_pf_milp = solve_perfect_foresight_milp(df_comp, df_lanes, df_sched, df_pipe, mip_rel_gap=2e-3)
+    res_pf_milp = solve_perfect_foresight_milp(df_comp, df_lanes, df_sched, df_pipe, mip_rel_gap=5e-5)
 
     summary_rows = []
     for name, r in [
@@ -1180,7 +1209,9 @@ def main() -> None:
                 "Emergency_Air_Freight_USD": round(r["cost_exp_freight"], 2),
                 "Holding_Cost_USD": round(r["cost_holding"], 2),
                 "Stockout_Penalty_USD": round(r["cost_stockout"], 2),
-                "Line_Fill_Rate_Pct": round(r["fill_rate_pct"], 2),
+                "Component_Fill_Rate_Pct": round(r["fill_rate_pct"], 2),
+                "Cost_Before_Backlog_Penalty_USD": round(r["cost_before_backlog_penalty"], 2),
+                "Ending_Backlog_Units": round(r["ending_backlog_units"], 2),
                 "USA_Domestic_Share_Pct": round(r["usa_share_pct"], 2),
                 "USMCA_Nearshore_Share_Pct": round(r["usmca_share_pct"], 2),
                 "Peak_Warehouse_Util_Pct": round(r["peak_wh_util_pct"], 2),
@@ -1191,10 +1222,24 @@ def main() -> None:
 
     print("\n--- Executive 26-Week 5-Policy Benchmark Comparison ---")
     print(df_summary.to_string(index=False))
-    print(f"\nRolling-Horizon MILP Total Runtime (26 epochs): {res_rh_milp['solve_time_sec']:.2f}s | Perfect-Foresight Ref: {res_pf_milp['solve_time_sec']:.2f}s")
+    print(f"\nRolling-Horizon MILP Total Runtime (25 order decisions): {res_rh_milp['solve_time_sec']:.2f}s | Perfect-Foresight Ref: {res_pf_milp['solve_time_sec']:.2f}s")
 
-    print("\n6. Running N=50 Non-Anticipative Monte Carlo Random Port-Strike Stress Test...")
-    df_mc = run_monte_carlo_stress_test(df_comp, df_lanes, df_sched, df_pipe, n_trials=50, seed=42)
+    sensitivity_rows = []
+    for scale in (0.10, 0.25, 0.50, 1.00):
+        components = df_comp.assign(stockout_penalty_wk=df_comp["stockout_penalty_wk"] * scale)
+        static = simulate_heuristic_policy(components, df_lanes, df_sched, df_pipe, mode="static_ocean")
+        rolling = res_rh_milp if scale == 1.0 else simulate_rolling_horizon_milp(components, df_lanes, df_sched, df_pipe)
+        sensitivity_rows.append({
+            "penalty_multiplier": scale,
+            "static_cost": static["total_net_cost"],
+            "rolling_cost": rolling["total_net_cost"],
+            "rolling_fill_pct": rolling["fill_rate_pct"],
+            "solver_limits": rolling["limits_reached"],
+        })
+    pd.DataFrame(sensitivity_rows).to_csv("results/backlog_penalty_sensitivity.csv", index=False)
+    print(f"\n6. Running {44 * args.paths_per_strike} strike and demand scenarios...")
+    df_mc = run_monte_carlo_stress_test(df_comp, df_lanes, df_sched, df_pipe,
+                                       paths_per_strike=args.paths_per_strike, seed=42, workers=args.workers)
     df_mc.to_csv("results/monte_carlo_stress_test.csv", index=False)
     print(
         f"Monte Carlo Mean Savings vs. Static (s, S): "

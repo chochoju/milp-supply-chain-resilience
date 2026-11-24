@@ -1,7 +1,7 @@
 component_id,name,category,units_per_bess,base_apac_unit_cost,net_unit_weight_kg,gross_unit_weight_kg,unit_volume_m3,holding_cost_wk,stockout_penalty_wk,initial_inventory,target_ending_ss,sec301_tariff_rate,sec45x_credit_unit
-CMP_LFP_MOD,LFP Battery Module (25 kWh Sub-Pack),Energy Storage Core,4,2100.0,185.0,197.95,0.42,10.5,2650.0,260,200,0.25,875.0
-CMP_PCS_INV,Bidirectional PCS Inverter (50 kW),Power Electronics,1,3200.0,95.0,101.65,0.35,15.0,3950.0,70,55,0.5,1000.0
+CMP_LFP_MOD,LFP Battery Module (25 kWh Sub-Pack),Energy Storage Core,4,2100.0,185.0,197.95,0.42,10.5,2650.0,260,200,0.25,250.0
+CMP_PCS_INV,Bidirectional PCS Inverter (50 kW),Power Electronics,1,3200.0,95.0,101.65,0.35,15.0,3950.0,70,55,0.5,0.0
 CMP_BMS_CTL,Master Battery Management System (BMS),Power Electronics,1,680.0,8.5,9.1,0.04,3.2,1150.0,85,65,0.5,0.0
 CMP_THM_PLT,Liquid Thermal Cold-Plate Assembly,Thermal Management,2,420.0,28.0,29.96,0.14,2.0,680.0,150,110,0.25,0.0
 CMP_HV_HARN,High-Voltage Busbar & Wiring Harness,Electrical BOS,1,310.0,16.0,17.12,0.06,1.45,520.0,80,60,0.25,0.0
-CMP_ENC_CAB,NEMA 3R Fire-Rated Steel Enclosure,Structural BOS,1,1150.0,410.0,438.7,1.65,5.5,1650.0,65,50,0.25,0.0
+CMP_ENC_CAB,NEMA Type 3R Steel Enclosure,Structural BOS,1,1150.0,410.0,438.7,1.65,5.5,1650.0,65,50,0.25,0.0

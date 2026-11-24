@@ -1,6 +1,6 @@
-Policy,Total_Net_Cost_USD,Net_Procurement_Tariff_USD,Std_Freight_Setup_USD,Emergency_Air_Freight_USD,Holding_Cost_USD,Stockout_Penalty_USD,Line_Fill_Rate_Pct,USA_Domestic_Share_Pct,USMCA_Nearshore_Share_Pct,Peak_Warehouse_Util_Pct
-"A: Static Single-Source (s, S) Ocean",105221942.35,17270000.0,599711.2,0.0,33661.15,87318570.0,54.66,0.0,0.0,35.04
-"B1: Reactive Air-Expediting (s, S)",30541136.76,25321050.0,500753.6,4573447.36,145885.8,0.0,100.0,0.0,0.0,119.01
-"B2: Dual-Sourced Heuristic (s, S)",75317828.89,17414112.0,562617.24,0.0,119679.65,57221420.0,69.51,21.38,3.9,95.31
-C: Rolling-Horizon MILP (Non-Anticipative),21270960.92,17337011.3,228161.2,220657.92,170830.5,3314300.0,96.07,81.43,5.99,79.93
-D: Perfect-Foresight Reference MILP,20700813.14,16712684.5,232250.4,188790.09,114358.15,3452730.0,95.09,81.84,5.82,56.31
+Policy,Total_Net_Cost_USD,Net_Procurement_Tariff_USD,Std_Freight_Setup_USD,Emergency_Air_Freight_USD,Holding_Cost_USD,Stockout_Penalty_USD,Component_Fill_Rate_Pct,Cost_Before_Backlog_Penalty_USD,Ending_Backlog_Units,USA_Domestic_Share_Pct,USMCA_Nearshore_Share_Pct,Peak_Warehouse_Util_Pct
+"A: Static Single-Source (s, S) Ocean",100348384.75,12560000.0,436153.6,0.0,33661.15,87318570.0,31.1,13029814.75,4273.0,0.0,0.0,35.04
+"B1: Reactive Air-Expediting (s, S)",53247469.42,18897787.5,425414.96,2206015.46,51711.5,31666540.0,56.91,21580929.42,867.0,0.0,0.0,52.36
+"B2: Dual-Sourced Heuristic (s, S)",72665530.79,14877550.0,451039.14,0.0,115521.65,57221420.0,69.36,15444110.79,3777.0,25.09,4.76,95.31
+C: Rolling-Horizon MILP (Non-Anticipative),22447945.34,18415180.9,264543.58,186493.21,87637.65,3494090.0,95.26,18953855.34,593.0,28.61,42.79,51.53
+D: Perfect-Foresight Reference MILP,22428416.84,18326622.4,275482.08,185953.21,99269.15,3541090.0,95.1,18887326.84,612.0,23.96,42.88,57.7
