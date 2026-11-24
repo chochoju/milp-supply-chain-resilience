@@ -178,14 +178,14 @@ The benchmark combines selected public reference values with synthetic costs, le
 
 ## Author & Citation
 
-**Juyeon Cho (Jenny)**
+**Juyeon Cho (Jenny)**, M.S. in Business Analytics (Duke University) — *Manufacturing Data & Analytics Engineer*
 
 ```bibtex
 @misc{milp_supply_chain_resilience_2026,
   author       = {Cho, Juyeon},
   title        = {Procurement and Inventory Planning for U.S. Clean Tech Manufacturing},
   year         = {2026},
-  howpublished = {Technical white paper and synthetic benchmark},
+  publisher    = {GitHub / Zenodo},
   url          = {https://github.com/chochoju/milp-supply-chain-resilience}
 }
 ```
